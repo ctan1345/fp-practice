@@ -1,6 +1,5 @@
 module Tree where
 
-import Data.Tree (Forest, drawTree, mkTree)
 import Prelude
 
 import Control.Fold (Fold, foldl, unfoldFold_)
@@ -12,84 +11,87 @@ import Data.List (List(..), (:))
 import Data.List as L
 import Data.List.NonEmpty (fromList, toList)
 import Data.List.Types (NonEmptyList)
-import Data.Map (SemigroupMap(..))
+import Data.Map (SemigroupMap(..), empty)
 import Data.Map as M
 import Data.Maybe (fromMaybe)
-import Data.Newtype (unwrap)
-import Data.Set (Set)
-import Data.Set as S
+import Data.Newtype (class Newtype, unwrap)
 import Data.Traversable (sequence)
+import Data.Tree (Tree, Forest, mkTree)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Node.Encoding (Encoding(..))
 import Node.FS.Sync (readTextFile)
 import Text.CSV as CSV
 
-type Node = 
+type Node a = 
   { code :: String 
   , name :: String
+  | a 
   }
 
-root :: Node
-root = { code: "All", name: "All" }
+newtype TreeNode = TreeNode (Node ())
 
-type HierarchyList = NonEmptyList Node
+instance Show TreeNode where
+  show (TreeNode node) = node.name <> "(" <> node.code <> ")"
 
-data TreeBuilder = Tree (SemigroupMap Node TreeBuilder) | Leaf (Set Node)
+derive newtype instance Eq TreeNode
+derive newtype instance Ord TreeNode
 
-instance Show TreeBuilder where
-  show (Tree m) = show m
-  show (Leaf l) = show l
 
-instance Eq TreeBuilder where
-  eq _ _ = false
+type Validated = { isValid :: Boolean }
 
-instance Ord TreeBuilder where
-  compare (Tree m) (Tree m') = compare m m'
-  compare _ _ = LT
+newtype ValidatedNode = ValidatedNode (Node ( isValid :: Boolean ))
+instance Show ValidatedNode where
+  show (ValidatedNode node) = node.code <> " (" <> node.name <> ")"
 
-instance Monoid TreeBuilder where
-  mempty = Tree mempty
+derive newtype instance Eq ValidatedNode
+derive newtype instance Ord ValidatedNode
 
-instance Semigroup TreeBuilder where
-  append (Tree m) (Tree m') = Tree $ append m m'
-  append (Leaf l) (Leaf l') = Leaf $ append l l'
-  append (Tree m) (Leaf l) = Tree <<< SemigroupMap $ M.union (unwrap m) $ M.fromFoldable $ S.map (\k -> Tuple k (Leaf mempty))  l
-  append (Leaf l) (Tree map) = append (Tree map) (Leaf l)
+isValid :: ValidatedNode -> Boolean
+isValid (ValidatedNode n) = n.isValid
 
-test :: ExceptT String Effect String
-test = do
-  file <- lift $ readTextFile UTF8 "./geo2.csv"
+derive instance Newtype ValidatedNode _
+
+root :: TreeNode
+root = TreeNode { code: "All", name: "All" }
+
+type HierarchyList = NonEmptyList TreeNode
+
+newtype TreeBuilder = TreeBuilder (SemigroupMap TreeNode TreeBuilder)
+derive instance Newtype TreeBuilder _
+
+emptyTreeBuilder :: TreeBuilder
+emptyTreeBuilder = TreeBuilder (SemigroupMap empty)
+
+parseTree :: ExceptT String Effect (Tree TreeNode)
+parseTree = do
+  file <- lift $ readTextFile UTF8 "./geo3.csv"
   csv <- except $ lmap _.error $ CSV.parse file
-  hier <- except <<< sequence $ note "Row does not have enough columns to build tree" <<< fromList <<< toHierarchy <$> take 80 csv
+  hier <- except <<< sequence $ note "Row does not have enough columns to build tree" <<< fromList <<< toHierarchy <$> csv
 
   let result = foldl builderFold $ toList <$> hier
   let tree = mkTree root $ toTree result
 
-  pure $ drawTree $ _.code <$> tree
+  pure tree
 
   where
-  toHierarchy :: Array String -> List Node
+  toHierarchy :: Array String -> List TreeNode
   toHierarchy [] = Nil
   toHierarchy xs = case take 2 xs of 
-    [code, name] -> { code, name } : toHierarchy (drop 2 xs)
+    [code, name] -> TreeNode { code, name } : toHierarchy (drop 2 xs)
     _ -> Nil
 
-  toTree :: TreeBuilder -> Forest Node
-  toTree (Tree (SemigroupMap m)) = (\(Tuple k v) -> mkTree k $ toTree v) <$> M.toUnfoldable m
-  toTree (Leaf l) = flip mkTree Nil <$> S.toUnfoldable l
+  toTree :: TreeBuilder -> Forest TreeNode
+  toTree (TreeBuilder (SemigroupMap m)) = (\(Tuple k v) -> mkTree k $ toTree v) <$> M.toUnfoldable m
 
 
-builderFold :: Fold (List Node) TreeBuilder
-builderFold = unfoldFold_ mempty $ flip addNodes
+builderFold :: Fold (List TreeNode) TreeBuilder
+builderFold = unfoldFold_ emptyTreeBuilder $ flip addNodes
 
-addNodes :: List Node -> TreeBuilder -> TreeBuilder
+addNodes :: List TreeNode -> TreeBuilder -> TreeBuilder
 addNodes Nil ms = ms
-addNodes (x:y:Nil) (Tree m) = Tree <<< SemigroupMap $ M.alter (pure <<< insertBuilder y <<< fromMaybe mempty) x (unwrap m)
-addNodes xs@(x:_:_) (Tree m) = Tree <<< SemigroupMap $ M.alter (pure <<< addNodes (L.drop 1 xs) <<< fromMaybe mempty) x (unwrap m)
-addNodes _ (Leaf l) = Leaf $ l
-addNodes _ _ = mempty
+addNodes (x:y:Nil) (TreeBuilder m) = TreeBuilder <<< SemigroupMap $ M.alter (pure <<< insertBuilder y <<< fromMaybe emptyTreeBuilder) x (unwrap m)
+addNodes xs@(x:_) (TreeBuilder m) = TreeBuilder <<< SemigroupMap $ M.alter (pure <<< addNodes (L.drop 1 xs) <<< fromMaybe emptyTreeBuilder) x (unwrap m)
 
-insertBuilder :: Node -> TreeBuilder -> TreeBuilder
-insertBuilder node (Tree (SemigroupMap m)) = Tree <<< SemigroupMap $ M.insert node mempty m
-insertBuilder node (Leaf l) = Leaf $ S.insert node l
+insertBuilder :: TreeNode -> TreeBuilder -> TreeBuilder
+insertBuilder node (TreeBuilder (SemigroupMap m)) = TreeBuilder <<< SemigroupMap $ M.insert node emptyTreeBuilder m
