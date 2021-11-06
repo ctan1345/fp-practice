@@ -2,6 +2,7 @@ module Tree where
 
 import Prelude
 
+import Control.Comonad.Cofree (head, tail, (:<))
 import Control.Fold (Fold, foldl, unfoldFold_)
 import Control.Monad.Except (ExceptT, except, lift)
 import Data.Array (drop, take)
@@ -13,10 +14,10 @@ import Data.List.NonEmpty (fromList, toList)
 import Data.List.Types (NonEmptyList)
 import Data.Map (SemigroupMap(..), empty)
 import Data.Map as M
-import Data.Maybe (fromMaybe)
+import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Newtype (class Newtype, unwrap)
 import Data.Traversable (sequence)
-import Data.Tree (Tree, Forest, mkTree)
+import Data.Tree (Forest, Tree, appendChild, mkTree)
 import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Node.Encoding (Encoding(..))
@@ -36,21 +37,9 @@ instance Show TreeNode where
 
 derive newtype instance Eq TreeNode
 derive newtype instance Ord TreeNode
+derive instance Newtype TreeNode _
 
 
-type Validated = { isValid :: Boolean }
-
-newtype ValidatedNode = ValidatedNode (Node ( isValid :: Boolean ))
-instance Show ValidatedNode where
-  show (ValidatedNode node) = node.code <> " (" <> node.name <> ")"
-
-derive newtype instance Eq ValidatedNode
-derive newtype instance Ord ValidatedNode
-
-isValid :: ValidatedNode -> Boolean
-isValid (ValidatedNode n) = n.isValid
-
-derive instance Newtype ValidatedNode _
 
 root :: TreeNode
 root = TreeNode { code: "All", name: "All" }
@@ -95,3 +84,41 @@ addNodes xs@(x:_) (TreeBuilder m) = TreeBuilder <<< SemigroupMap $ M.alter (pure
 
 insertBuilder :: TreeNode -> TreeBuilder -> TreeBuilder
 insertBuilder node (TreeBuilder (SemigroupMap m)) = TreeBuilder <<< SemigroupMap $ M.insert node emptyTreeBuilder m
+
+
+
+foldWithLevel :: ∀ a b. (Int -> b -> a -> b) -> b -> Tree a -> b
+foldWithLevel = go 0
+  where
+  go :: Int -> (Int -> b -> a -> b) -> b -> Tree a -> b
+  go n f b t = let b' = (f n b $ head t) in L.foldl (go (n + 1) f) b' (tail t)
+
+mapWithLevel :: ∀ a b. (Int -> a -> b) -> Tree a -> Tree b
+mapWithLevel = go 0
+  where
+  go :: Int -> (Int -> a -> b) -> Tree a -> Tree b
+  go n f t = (f n $ head t) :< ((go (n + 1) f) <$> tail t)
+
+-- Given a function that takes level and parent, returns a new child
+appendAtLevel :: ∀ a. Int -> (Int -> Tree a -> Maybe (Tree a)) -> Tree a -> Tree a
+appendAtLevel level f  = go 0 
+  where 
+  go :: Int -> Tree a -> Tree a
+  go i t | i < level = head t :< ((go (i + 1)) <$> (tail t))
+  go i t = case f i t of
+    Nothing -> t
+    Just child -> appendChild child t
+
+firstBranch :: Tree ~> List
+firstBranch t = head t : fromMaybe Nil (firstBranch <$> (L.head $ tail t))
+
+joinTree :: ∀ a. List (Tree a) -> Maybe (Tree a)
+joinTree Nil = Nothing
+joinTree (x:xs) = case joinTree xs of
+  Nothing -> Just x
+  Just c -> Just $ appendChild c x
+
+match :: ∀ a. (a -> Boolean) -> Tree a -> List (Tree a)
+match f t = 
+  let h = head t
+  in if f h then t : ((match f) =<< tail t) else match f =<< tail t
